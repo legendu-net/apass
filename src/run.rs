@@ -35,7 +35,7 @@ pub fn run(
         })?
         .to_string();
 
-    println!(
+    eprintln!(
         "Auto filling password for the command {}",
         shell_join(command)
     );
@@ -50,12 +50,29 @@ pub fn run(
     // `child.logfile_read = sys.stdout.buffer` (apass.py:96). `as_bytes()`
     // already includes the text before the match, so it must not also be
     // combined with `before()` -- that would print the pre-match text twice.
-    let caps = session.expect(Regex(prompt.as_str()))?;
-    io::stdout().write_all(caps.as_bytes())?;
-    io::stdout().flush()?;
+    match session.expect(Regex(prompt.as_str())) {
+        Ok(caps) => {
+            io::stdout().write_all(caps.as_bytes())?;
+            io::stdout().flush()?;
 
-    thread::sleep(Duration::from_millis(300));
-    session.send_line(password)?;
+            thread::sleep(Duration::from_millis(300));
+            session.send_line(password)?;
+        }
+        // The command exited on its own before ever showing the prompt --
+        // e.g. `gopass` already had a cached/unlocked session from an
+        // earlier run, so this invocation never needed the password.
+        // `expectrl` doesn't hand back the bytes it already buffered when
+        // `expect()` fails with `Eof`, so re-`expect`ing `Eof` (which always
+        // matches once the stream is at EOF) is what recovers the child's
+        // output instead of losing it.
+        Err(expectrl::Error::Eof) => {
+            let caps = session.expect(expectrl::Eof)?;
+            io::stdout().write_all(caps.as_bytes())?;
+            io::stdout().flush()?;
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    }
 
     interact(session)
 }

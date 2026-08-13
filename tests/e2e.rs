@@ -101,3 +101,32 @@ fn errors_when_no_prompt_matches_the_command() {
         .expect(Regex("No prompt whose command is a prefix"))
         .unwrap();
 }
+
+#[test]
+fn succeeds_when_the_command_exits_without_ever_prompting() {
+    // Mirrors a tool like `gopass` that manages its own credential cache:
+    // when it's already unlocked from an earlier run, it never prints its
+    // password prompt at all, and apass shouldn't treat that as a failure.
+    let home = tempfile::tempdir().unwrap();
+    let config_dir = home.path().join(".config").join("apass");
+    write_prompts(&config_dir);
+    seed_cached_password(&config_dir, "hunter2");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_apass"));
+    cmd.env("HOME", home.path());
+    cmd.args(["sh", "-c", "echo already-unlocked-output"]);
+
+    let mut session = OsSession::spawn(cmd).unwrap();
+    session.set_expect_timeout(Some(Duration::from_secs(10)));
+
+    let caps = session.expect(Eof).unwrap();
+    let transcript = String::from_utf8_lossy(caps.as_bytes());
+    assert!(
+        transcript.contains("already-unlocked-output"),
+        "expected the command's own output to still be shown, got: {transcript:?}"
+    );
+    assert!(
+        !transcript.contains("EOF was reached"),
+        "the raw expectrl EOF error should not leak to the user, got: {transcript:?}"
+    );
+}
