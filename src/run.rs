@@ -1,8 +1,7 @@
 //! Spawn the target command, fill in its password prompt, and hand the
-//! terminal back to the user. Mirrors `apass.py::_apass` (`apass.py:86-100`).
+//! terminal back to the user.
 
 use std::io::{self, Write};
-use std::path::Path;
 use std::process::Command as StdCommand;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,25 +15,15 @@ use expectrl::{Expect, Regex};
 use terminal_size::{Height, Width};
 
 use crate::error::AppError;
-use crate::prompts::{Prompt, find_prompt};
 
-/// pexpect's own default `spawn(timeout=...)`, so `expect()` fails at
-/// roughly the same point `apass.py` would.
+/// How long to wait for the configured password prompt before giving up.
 const EXPECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub fn run(
-    command: &[String],
-    password: &str,
-    prompts: &[Prompt],
-    prompts_path: &Path,
-) -> Result<(), AppError> {
-    let prompt = find_prompt(command, prompts)
-        .ok_or_else(|| AppError::NoPromptFound {
-            command: shell_join(command),
-            path: prompts_path.to_path_buf(),
-        })?
-        .to_string();
-
+/// Spawn `command`, wait for `prompt` (a regex), send `password`, and hand
+/// the terminal back to the user. Resolving which prompt/password to use is
+/// the caller's job -- see `main.rs`'s `run` dispatch -- since that needs
+/// both `prompts.yml` and the named password store.
+pub fn run(command: &[String], password: &str, prompt: &str) -> Result<(), AppError> {
     eprintln!(
         "Auto filling password for the command {}",
         shell_join(command)
@@ -46,11 +35,11 @@ pub fn run(
     session.set_expect_timeout(Some(EXPECT_TIMEOUT));
     apply_window_size(&mut session);
 
-    // Stream everything read while waiting for the prompt, matching
-    // `child.logfile_read = sys.stdout.buffer` (apass.py:96). `as_bytes()`
-    // already includes the text before the match, so it must not also be
-    // combined with `before()` -- that would print the pre-match text twice.
-    match session.expect(Regex(prompt.as_str())) {
+    // Stream everything read while waiting for the prompt back to the
+    // user's terminal. `as_bytes()` already includes the text before the
+    // match, so it must not also be combined with `before()` -- that would
+    // print the pre-match text twice.
+    match session.expect(Regex(prompt)) {
         Ok(caps) => {
             io::stdout().write_all(caps.as_bytes())?;
             io::stdout().flush()?;
@@ -78,8 +67,7 @@ pub fn run(
 }
 
 /// Hand the terminal to the user, keeping the child's pty in sync with the
-/// real terminal size (`apass.py` never does this, so `ssh`/full-screen
-/// programs are stuck at a fixed 80x24 there).
+/// real terminal size so `ssh`/full-screen programs render correctly.
 fn interact(mut session: OsSession) -> Result<(), AppError> {
     let resize_pending = Arc::new(AtomicBool::new(false));
     // Best-effort: if registering the handler fails there's nothing more
@@ -149,9 +137,8 @@ fn apply_window_size(session: &mut OsSession) {
     }
 }
 
-/// A minimal `shlex.quote`/`shlex.join` for display purposes, using the
-/// same "safe" character set as Python's `shlex.quote`
-/// (word characters plus `@%+=:,./-`).
+/// A minimal shell-quoting helper for display purposes only ("safe"
+/// characters -- left unquoted -- are word characters plus `@%+=:,./-`).
 fn shell_quote(token: &str) -> String {
     let is_safe = |c: char| c.is_ascii_alphanumeric() || "@%_+=:,./-".contains(c);
     if !token.is_empty() && token.chars().all(is_safe) {
@@ -161,7 +148,7 @@ fn shell_quote(token: &str) -> String {
     }
 }
 
-fn shell_join(tokens: &[String]) -> String {
+pub fn shell_join(tokens: &[String]) -> String {
     tokens
         .iter()
         .map(|t| shell_quote(t))

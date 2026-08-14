@@ -1,7 +1,4 @@
 //! Location of `apass`'s config directory and the files inside it.
-//!
-//! Mirrors `apass.py`'s `CONFIG_DIR`, `PATH_CONFIG`, and `PATH_PROMPTS`
-//! (`apass.py:18-20`).
 
 use std::path::{Path, PathBuf};
 
@@ -19,7 +16,7 @@ impl Config {
         Self { dir: dir.into() }
     }
 
-    /// `$HOME/.config/apass`, matching `Path.home() / ".config" / "apass"`.
+    /// `$HOME/.config/apass`.
     pub fn from_home() -> Result<Self, AppError> {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
@@ -40,10 +37,9 @@ impl Config {
     }
 }
 
-/// The current username, matching the environment-variable lookup order of
-/// Python's `getpass.getuser()` (`apass.py:22`): `LOGNAME`, `USER`, `LNAME`,
-/// `USERNAME`. Unlike `getpass.getuser()` this has no `pwd`-database
-/// fallback, so it errors if none of those variables are set.
+/// The current username, checked in this order: `LOGNAME`, `USER`, `LNAME`,
+/// `USERNAME`. There is no `pwd`-database fallback, so it errors if none of
+/// those variables are set.
 pub fn current_username() -> Result<String, AppError> {
     username_from(|key| std::env::var(key).ok())
 }

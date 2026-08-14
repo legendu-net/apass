@@ -21,12 +21,23 @@ fn write_prompts(config_dir: &Path) {
     .unwrap();
 }
 
+/// Like [`write_prompts`], but the entry names a non-default password.
+fn write_prompts_with_named_password(config_dir: &Path, password_name: &str) {
+    fs::create_dir_all(config_dir).unwrap();
+    fs::write(
+        config_dir.join("prompts.yml"),
+        format!("- command: [\"sh\"]\n  prompt: \"PWPROMPT:\"\n  password: {password_name}\n"),
+    )
+    .unwrap();
+}
+
 /// Pre-seed a cache entry so the run under test never has to prompt an
 /// interactive user for a password.
-fn seed_cached_password(config_dir: &Path, password: &str) {
+fn seed_cached_password(config_dir: &Path, name: &str, password: &str) {
     let now = chrono::Local::now().naive_local();
     let json = format!(
-        "{{\n    \"password\": \"{}\",\n    \"time\": \"{}\"\n}}",
+        "{{\n  \"{}\": {{\"password\": \"{}\", \"time\": \"{}\"}}\n}}",
+        name,
         STANDARD.encode(password.as_bytes()),
         now.format("%Y-%m-%d %H:%M:%S%.6f")
     );
@@ -38,7 +49,7 @@ fn fills_in_the_password_and_hands_the_terminal_back() {
     let home = tempfile::tempdir().unwrap();
     let config_dir = home.path().join(".config").join("apass");
     write_prompts(&config_dir);
-    seed_cached_password(&config_dir, "hunter2");
+    seed_cached_password(&config_dir, "default", "hunter2");
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_apass"));
     cmd.env("HOME", home.path());
@@ -52,6 +63,7 @@ fn fills_in_the_password_and_hands_the_terminal_back() {
     cmd.env("PREAMBLE_TEXT", "PREAMBLE_MARKER\n");
     cmd.env("PW_PROMPT_TEXT", "PWPROMPT: ");
     cmd.args([
+        "run",
         "sh",
         "-c",
         // Output *before* the prompt matters here: `expect()`'s
@@ -68,9 +80,8 @@ fn fills_in_the_password_and_hands_the_terminal_back() {
     session.set_expect_timeout(Some(Duration::from_secs(10)));
 
     // The target `sh` process's output up to its password prompt is echoed
-    // back through `apass`'s own stdout (mirroring `child.logfile_read` in
-    // apass.py), then apass fills it in without any input from us and
-    // hands control back for `sh` to print its result.
+    // back through `apass`'s own stdout, then apass fills it in without any
+    // input from us and hands control back for `sh` to print its result.
     let caps = session.expect(Eof).unwrap();
     let transcript = String::from_utf8_lossy(caps.as_bytes());
     assert_eq!(
@@ -89,11 +100,11 @@ fn errors_when_no_prompt_matches_the_command() {
     let home = tempfile::tempdir().unwrap();
     let config_dir = home.path().join(".config").join("apass");
     write_prompts(&config_dir);
-    seed_cached_password(&config_dir, "hunter2");
+    seed_cached_password(&config_dir, "default", "hunter2");
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_apass"));
     cmd.env("HOME", home.path());
-    cmd.args(["echo", "hello"]);
+    cmd.args(["run", "echo", "hello"]);
 
     let mut session = OsSession::spawn(cmd).unwrap();
     session.set_expect_timeout(Some(Duration::from_secs(10)));
@@ -110,11 +121,11 @@ fn succeeds_when_the_command_exits_without_ever_prompting() {
     let home = tempfile::tempdir().unwrap();
     let config_dir = home.path().join(".config").join("apass");
     write_prompts(&config_dir);
-    seed_cached_password(&config_dir, "hunter2");
+    seed_cached_password(&config_dir, "default", "hunter2");
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_apass"));
     cmd.env("HOME", home.path());
-    cmd.args(["sh", "-c", "echo already-unlocked-output"]);
+    cmd.args(["run", "sh", "-c", "echo already-unlocked-output"]);
 
     let mut session = OsSession::spawn(cmd).unwrap();
     session.set_expect_timeout(Some(Duration::from_secs(10)));
@@ -129,4 +140,167 @@ fn succeeds_when_the_command_exits_without_ever_prompting() {
         !transcript.contains("EOF was reached"),
         "the raw expectrl EOF error should not leak to the user, got: {transcript:?}"
     );
+}
+
+#[test]
+fn uses_the_password_named_by_the_matching_prompt_entry() {
+    let home = tempfile::tempdir().unwrap();
+    let config_dir = home.path().join(".config").join("apass");
+    write_prompts_with_named_password(&config_dir, "work");
+    seed_cached_password(&config_dir, "work", "correct-horse");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_apass"));
+    cmd.env("HOME", home.path());
+    cmd.args([
+        "run",
+        "sh",
+        "-c",
+        "printf 'PWPROMPT: '; read -r p; echo; echo got:$p",
+    ]);
+
+    let mut session = OsSession::spawn(cmd).unwrap();
+    session.set_expect_timeout(Some(Duration::from_secs(10)));
+    let caps = session.expect(Eof).unwrap();
+    let transcript = String::from_utf8_lossy(caps.as_bytes());
+    assert!(
+        transcript.contains("got:correct-horse"),
+        "expected the 'work' password to be used, got: {transcript:?}"
+    );
+}
+
+#[test]
+fn errors_when_the_named_password_is_not_cached() {
+    let home = tempfile::tempdir().unwrap();
+    let config_dir = home.path().join(".config").join("apass");
+    write_prompts_with_named_password(&config_dir, "work");
+    // No `profile.json` seeded at all -- "work" has never been cached.
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_apass"));
+    cmd.env("HOME", home.path());
+    cmd.args(["run", "sh", "-c", "printf 'PWPROMPT: '"]);
+
+    let mut session = OsSession::spawn(cmd).unwrap();
+    session.set_expect_timeout(Some(Duration::from_secs(10)));
+    session
+        .expect(Regex("no password named \"work\" is cached"))
+        .unwrap();
+}
+
+#[test]
+fn password_list_and_remove_work_through_the_compiled_binary() {
+    // Unlike `password set` (which reads from `/dev/tty` via `rpassword` and
+    // so needs a real pty), `list`/`remove` never touch stdin, so a plain
+    // `Command::output()` is enough to exercise the CLI-parsing ->
+    // subcommand-dispatch path end to end.
+    let home = tempfile::tempdir().unwrap();
+    let config_dir = home.path().join(".config").join("apass");
+    fs::create_dir_all(&config_dir).unwrap();
+    seed_cached_password(&config_dir, "work", "correct-horse");
+
+    let list = |home: &Path| {
+        String::from_utf8(
+            Command::new(env!("CARGO_BIN_EXE_apass"))
+                .env("HOME", home)
+                .args(["passwd", "list"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+    };
+
+    assert!(list(home.path()).contains("work"));
+
+    let remove = Command::new(env!("CARGO_BIN_EXE_apass"))
+        .env("HOME", home.path())
+        .args(["passwd", "remove", "work"])
+        .output()
+        .unwrap();
+    assert!(remove.status.success());
+    assert!(!list(home.path()).contains("work"));
+
+    // Removing an already-absent name is an error, surfaced on stderr.
+    let remove_again = Command::new(env!("CARGO_BIN_EXE_apass"))
+        .env("HOME", home.path())
+        .args(["passwd", "remove", "work"])
+        .output()
+        .unwrap();
+    assert!(!remove_again.status.success());
+    assert!(String::from_utf8_lossy(&remove_again.stderr).contains("no password named \"work\""));
+}
+
+#[test]
+fn prompt_add_list_and_remove_work_through_the_compiled_binary() {
+    let home = tempfile::tempdir().unwrap();
+
+    let add = Command::new(env!("CARGO_BIN_EXE_apass"))
+        .env("HOME", home.path())
+        .args([
+            "prompt",
+            "add",
+            "--regex",
+            "Password:",
+            "--password",
+            "work",
+            "--",
+            "ssh",
+            "dev-server",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "stderr: {:?}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let list = Command::new(env!("CARGO_BIN_EXE_apass"))
+        .env("HOME", home.path())
+        .args(["prompt", "list"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&list.stdout);
+    assert!(stdout.contains("ssh dev-server"), "got: {stdout:?}");
+    assert!(stdout.contains("work"), "got: {stdout:?}");
+
+    let remove = Command::new(env!("CARGO_BIN_EXE_apass"))
+        .env("HOME", home.path())
+        .args(["prompt", "remove", "--", "ssh", "dev-server"])
+        .output()
+        .unwrap();
+    assert!(remove.status.success());
+
+    let list_after = Command::new(env!("CARGO_BIN_EXE_apass"))
+        .env("HOME", home.path())
+        .args(["prompt", "list"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&list_after.stdout)
+            .trim()
+            .is_empty()
+    );
+}
+
+#[test]
+fn h_is_an_alias_for_the_auto_generated_help_subcommand() {
+    // `h` is patched onto clap's auto-generated `help` subcommand at
+    // runtime (`Cli::parse()`, not a derive attribute -- see `cli.rs`), so
+    // unlike `r`/`pw`/`p` it can't be exercised via `Cli::try_parse_from`
+    // and needs to go through the compiled binary.
+    let home = tempfile::tempdir().unwrap();
+
+    let via_alias = Command::new(env!("CARGO_BIN_EXE_apass"))
+        .env("HOME", home.path())
+        .arg("h")
+        .output()
+        .unwrap();
+    let via_full_name = Command::new(env!("CARGO_BIN_EXE_apass"))
+        .env("HOME", home.path())
+        .arg("help")
+        .output()
+        .unwrap();
+
+    assert!(via_alias.status.success());
+    assert_eq!(via_alias.stdout, via_full_name.stdout);
 }

@@ -1,9 +1,4 @@
 //! Error type for `apass`.
-//!
-//! The four variants with fixed wording ([`AppError::OldMappingFormat`],
-//! [`AppError::PromptsNotList`], [`AppError::InvalidEntry`],
-//! [`AppError::NoPromptFound`]) mirror the `sys.exit(...)` messages in
-//! `apass.py`, so users of either implementation see the same text.
 
 use std::path::PathBuf;
 
@@ -59,4 +54,31 @@ pub enum AppError {
 
     #[error("Error: No prompt whose command is a prefix of '{command}' found in {path}")]
     NoPromptFound { command: String, path: PathBuf },
+
+    #[error(
+        "Error: no password named {name:?} is cached in {path}. Run: apass password set {name}"
+    )]
+    PasswordNotFound { name: String, path: PathBuf },
+
+    #[error(
+        "Error: {path} uses the old single-password format. Passwords are now stored by name, \
+         e.g.\n  {{\n    \"default\": {{\"password\": \"...\", \"time\": \"...\"}}\n  }}\nRun: \
+         apass password set to recreate it."
+    )]
+    OldProfileFormat { path: PathBuf },
+
+    #[error("Error: no password named {name:?} in {path}")]
+    PasswordEntryNotFound { name: String, path: PathBuf },
+
+    #[error("Error: no prompt entry found whose command is exactly '{command}' in {path}")]
+    PromptEntryNotFound { command: String, path: PathBuf },
+
+    #[error("Error: a prompt entry for '{command}' already exists in {path}")]
+    PromptEntryExists { command: String, path: PathBuf },
+
+    #[error("Error: editor {editor:?} exited with status {status}")]
+    EditorFailed {
+        editor: String,
+        status: std::process::ExitStatus,
+    },
 }

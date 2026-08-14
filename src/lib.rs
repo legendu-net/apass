@@ -1,6 +1,5 @@
 //! `apass`: run a command without the need to enter its password
-//! (repeatedly). A Rust port of `apass.py`, using `expectrl` in place of
-//! `pexpect`.
+//! (repeatedly), using `expectrl` to drive a pty.
 
 pub mod cli;
 pub mod config;

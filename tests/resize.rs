@@ -24,7 +24,7 @@ fn write_config(home: &std::path::Path) {
     .unwrap();
     let now = chrono::Local::now().naive_local();
     let json = format!(
-        "{{\n    \"password\": \"{}\",\n    \"time\": \"{}\"\n}}",
+        "{{\n  \"default\": {{\"password\": \"{}\", \"time\": \"{}\"}}\n}}",
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"hunter2"),
         now.format("%Y-%m-%d %H:%M:%S%.6f")
     );
@@ -35,6 +35,7 @@ fn spawn_apass_wrapping_a_slow_command(home: &std::path::Path) -> OsSession {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_apass"));
     cmd.env("HOME", home);
     cmd.args([
+        "run",
         "sh",
         "-c",
         "printf 'Password: '; read -r p; echo; sleep 5; echo done:$p",

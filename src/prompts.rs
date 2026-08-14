@@ -1,26 +1,29 @@
-//! Load and query `prompts.yml`.
-//!
-//! Mirrors `apass.py::_get_prompts` (`apass.py:26-53`) and
-//! `apass.py::_find_prompt` (`apass.py:56-66`).
+//! Load, query, and manage `prompts.yml`.
 
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use serde_yaml_ng::Value;
 
 use crate::error::AppError;
+use crate::password::DEFAULT_NAME;
 
-/// A single configured prompt: the command prefix it matches, and the
-/// (already `{USER}`-substituted) regex for the password prompt that
-/// command emits.
+/// A single configured prompt: the command prefix it matches, the (already
+/// `{USER}`-substituted) regex for the password prompt that command emits,
+/// and the name of the cached password to send.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prompt {
     pub command: Vec<String>,
     pub prompt: String,
+    pub password: String,
 }
 
-/// Load `prompts.yml`, creating an empty one if it doesn't exist yet.
-pub fn load(path: &Path, user: &str) -> Result<Vec<Prompt>, AppError> {
+/// Load the raw YAML entries in `prompts.yml`, creating an empty file if it
+/// doesn't exist yet. Unlike [`load`], this applies no `{USER}` substitution
+/// and no per-entry validation, so callers that rewrite the file (`prompt
+/// add`/`remove`) can round-trip entries they don't otherwise understand.
+pub fn load_raw(path: &Path) -> Result<Vec<Value>, AppError> {
     if !path.is_file() {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -30,8 +33,7 @@ pub fn load(path: &Path, user: &str) -> Result<Vec<Prompt>, AppError> {
 
     let text = fs::read_to_string(path)?;
     let value: Value = serde_yaml_ng::from_str(&text)?;
-    // An empty file parses as `Null`; treat that the same as an empty list,
-    // just as `yaml.safe_load(f) or []` does in the Python version.
+    // An empty file parses as `Null`; treat that the same as an empty list.
     let value = if value.is_null() {
         Value::Sequence(Vec::new())
     } else {
@@ -48,7 +50,17 @@ pub fn load(path: &Path, user: &str) -> Result<Vec<Prompt>, AppError> {
             path: path.to_path_buf(),
         });
     };
+    Ok(items)
+}
 
+fn save_raw(path: &Path, items: &[Value]) -> Result<(), AppError> {
+    fs::write(path, serde_yaml_ng::to_string(&items)?)?;
+    Ok(())
+}
+
+/// Load `prompts.yml`, creating an empty one if it doesn't exist yet.
+pub fn load(path: &Path, user: &str) -> Result<Vec<Prompt>, AppError> {
+    let items = load_raw(path)?;
     let mut prompts = Vec::with_capacity(items.len());
     for item in items {
         let entry = parse_entry(&item, user).ok_or_else(|| AppError::InvalidEntry {
@@ -72,7 +84,24 @@ fn parse_entry(item: &Value, user: &str) -> Option<Prompt> {
         .collect::<Option<Vec<String>>>()?;
     let prompt = map.get("prompt")?.as_str()?;
     let prompt = substitute_user(prompt, user).ok()?;
-    Some(Prompt { command, prompt })
+    let password = match map.get("password") {
+        None => DEFAULT_NAME.to_string(),
+        Some(v) => v.as_str()?.to_string(),
+    };
+    Some(Prompt {
+        command,
+        prompt,
+        password,
+    })
+}
+
+fn entry_command(item: &Value) -> Option<Vec<String>> {
+    item.as_mapping()?
+        .get("command")?
+        .as_sequence()?
+        .iter()
+        .map(|v| v.as_str().map(str::to_string))
+        .collect()
 }
 
 fn format_entry(item: &Value) -> String {
@@ -81,9 +110,9 @@ fn format_entry(item: &Value) -> String {
         .unwrap_or_else(|_| format!("{item:?}"))
 }
 
-/// Emulates the subset of Python's `str.format(USER=...)` used by
-/// `prompts.yml`: `{USER}` is substituted, `{{`/`}}` become literal braces,
-/// and any other placeholder (or an unmatched brace) is an error.
+/// Substitutes `{USER}` in a `prompts.yml` template with the current
+/// username. `{{`/`}}` become literal braces, and any other placeholder (or
+/// an unmatched brace) is an error.
 pub fn substitute_user(template: &str, user: &str) -> Result<String, AppError> {
     let invalid = || AppError::InvalidPlaceholder {
         template: template.to_string(),
@@ -131,7 +160,7 @@ pub fn substitute_user(template: &str, user: &str) -> Result<String, AppError> {
 }
 
 /// Find the prompt whose command is the longest prefix of `command`.
-pub fn find_prompt<'a>(command: &[String], prompts: &'a [Prompt]) -> Option<&'a str> {
+pub fn find_prompt<'a>(command: &[String], prompts: &'a [Prompt]) -> Option<&'a Prompt> {
     let mut best_length = 0;
     let mut best_prompt = None;
     for p in prompts {
@@ -139,10 +168,108 @@ pub fn find_prompt<'a>(command: &[String], prompts: &'a [Prompt]) -> Option<&'a 
             && command.get(..p.command.len()) == Some(p.command.as_slice())
         {
             best_length = p.command.len();
-            best_prompt = Some(p.prompt.as_str());
+            best_prompt = Some(p);
         }
     }
     best_prompt
+}
+
+/// `apass prompt list`: print each entry's command, prompt regex, and
+/// password name (raw, i.e. before `{USER}` substitution).
+pub fn cmd_list(path: &Path) -> Result<(), AppError> {
+    let items = load_raw(path)?;
+    for item in &items {
+        let command = entry_command(item).unwrap_or_default().join(" ");
+        let prompt = item
+            .as_mapping()
+            .and_then(|m| m.get("prompt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let password = item
+            .as_mapping()
+            .and_then(|m| m.get("password"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_NAME);
+        println!("{command}\t{prompt}\t{password}");
+    }
+    Ok(())
+}
+
+/// `apass prompt add`: append a new entry. Errors if an entry with the exact
+/// same command already exists, or if `regex` fails `{USER}` substitution
+/// (checked eagerly so a bad template is caught here rather than on the
+/// next `run`).
+pub fn cmd_add(
+    path: &Path,
+    command: &[String],
+    regex: &str,
+    password: &str,
+    user: &str,
+) -> Result<(), AppError> {
+    substitute_user(regex, user)?;
+
+    let mut items = load_raw(path)?;
+    if items
+        .iter()
+        .any(|item| entry_command(item).as_deref() == Some(command))
+    {
+        return Err(AppError::PromptEntryExists {
+            command: command.join(" "),
+            path: path.to_path_buf(),
+        });
+    }
+
+    let mut map = serde_yaml_ng::Mapping::new();
+    map.insert(
+        Value::String("command".to_string()),
+        Value::Sequence(command.iter().cloned().map(Value::String).collect()),
+    );
+    map.insert(
+        Value::String("prompt".to_string()),
+        Value::String(regex.to_string()),
+    );
+    if password != DEFAULT_NAME {
+        map.insert(
+            Value::String("password".to_string()),
+            Value::String(password.to_string()),
+        );
+    }
+    items.push(Value::Mapping(map));
+    save_raw(path, &items)
+}
+
+/// `apass prompt remove`: delete the entry whose command is exactly
+/// `command`.
+pub fn cmd_remove(path: &Path, command: &[String]) -> Result<(), AppError> {
+    let mut items = load_raw(path)?;
+    let before = items.len();
+    items.retain(|item| entry_command(item).as_deref() != Some(command));
+    if items.len() == before {
+        return Err(AppError::PromptEntryNotFound {
+            command: command.join(" "),
+            path: path.to_path_buf(),
+        });
+    }
+    save_raw(path, &items)
+}
+
+/// `apass prompt edit`: open `prompts.yml` in `$VISUAL`, `$EDITOR`, or `vi`,
+/// then validate it. The file is left exactly as the user saved it -- even
+/// if it's now invalid -- so a bad edit is reported, not silently reverted.
+pub fn cmd_edit(path: &Path, user: &str) -> Result<(), AppError> {
+    // Touch the file into existence first so there's something to edit.
+    load_raw(path)?;
+
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+    let status = Command::new(&editor).arg(path).status()?;
+    if !status.success() {
+        return Err(AppError::EditorFailed { editor, status });
+    }
+
+    load(path, user)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -153,10 +280,11 @@ mod tests {
         tokens.iter().map(|t| t.to_string()).collect()
     }
 
-    fn prompt(command: &[&str], text: &str) -> Prompt {
+    fn prompt(command: &[&str], text: &str, password: &str) -> Prompt {
         Prompt {
             command: toks(command),
             prompt: text.to_string(),
+            password: password.to_string(),
         }
     }
 
@@ -187,10 +315,49 @@ mod tests {
         assert_eq!(
             prompts,
             vec![
-                prompt(&["ssh", "dev-server"], "alice@dev-server's password:"),
-                prompt(&["sudo"], "[sudo] password for alice:"),
+                prompt(
+                    &["ssh", "dev-server"],
+                    "alice@dev-server's password:",
+                    DEFAULT_NAME
+                ),
+                prompt(&["sudo"], "[sudo] password for alice:", DEFAULT_NAME),
             ]
         );
+    }
+
+    #[test]
+    fn password_key_is_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompts.yml");
+        fs::write(
+            &path,
+            "- command: [\"ssh\", \"work\"]\n  prompt: \"Password:\"\n  password: work\n",
+        )
+        .unwrap();
+        let prompts = load(&path, "alice").unwrap();
+        assert_eq!(prompts[0].password, "work");
+    }
+
+    #[test]
+    fn missing_password_key_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompts.yml");
+        fs::write(&path, "- command: [\"ssh\"]\n  prompt: \"Password:\"\n").unwrap();
+        let prompts = load(&path, "alice").unwrap();
+        assert_eq!(prompts[0].password, DEFAULT_NAME);
+    }
+
+    #[test]
+    fn non_string_password_key_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompts.yml");
+        fs::write(
+            &path,
+            "- command: [\"ssh\"]\n  prompt: \"Password:\"\n  password: [1, 2]\n",
+        )
+        .unwrap();
+        let err = load(&path, "alice").unwrap_err();
+        assert!(matches!(err, AppError::InvalidEntry { .. }));
     }
 
     #[test]
@@ -267,8 +434,8 @@ mod tests {
 
     #[test]
     fn command_tokens_are_never_substituted() {
-        // A `{USER}` in a command token is left as-is by the Python version
-        // too -- substitution only ever applies to `prompt`.
+        // Substitution only ever applies to `prompt`, never to `command`
+        // tokens.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("prompts.yml");
         fs::write(
@@ -283,40 +450,119 @@ mod tests {
     #[test]
     fn find_prompt_matches_the_longest_prefix() {
         let prompts = vec![
-            prompt(&["ssh"], "generic ssh prompt"),
-            prompt(&["ssh", "dev-server"], "dev-server prompt"),
-            prompt(&["sudo"], "sudo prompt"),
+            prompt(&["ssh"], "generic ssh prompt", DEFAULT_NAME),
+            prompt(&["ssh", "dev-server"], "dev-server prompt", "work"),
+            prompt(&["sudo"], "sudo prompt", DEFAULT_NAME),
         ];
 
         assert_eq!(
-            find_prompt(&toks(&["ssh", "dev-server"]), &prompts),
+            find_prompt(&toks(&["ssh", "dev-server"]), &prompts).map(|p| p.prompt.as_str()),
             Some("dev-server prompt")
         );
         assert_eq!(
-            find_prompt(&toks(&["ssh", "other-host"]), &prompts),
+            find_prompt(&toks(&["ssh", "dev-server"]), &prompts).map(|p| p.password.as_str()),
+            Some("work")
+        );
+        assert_eq!(
+            find_prompt(&toks(&["ssh", "other-host"]), &prompts).map(|p| p.prompt.as_str()),
             Some("generic ssh prompt")
         );
         assert_eq!(find_prompt(&toks(&["sshfs", "dev-server"]), &prompts), None);
         assert_eq!(
-            find_prompt(&toks(&["ssh", "-p", "2222", "dev-server"]), &prompts),
+            find_prompt(&toks(&["ssh", "-p", "2222", "dev-server"]), &prompts)
+                .map(|p| p.prompt.as_str()),
             Some("generic ssh prompt")
         );
         assert_eq!(
-            find_prompt(&toks(&["ssh", "dev-server", "-v"]), &prompts),
+            find_prompt(&toks(&["ssh", "dev-server", "-v"]), &prompts).map(|p| p.prompt.as_str()),
             Some("dev-server prompt")
         );
     }
 
     #[test]
     fn find_prompt_treats_a_token_with_spaces_as_one_element() {
-        let prompts = vec![prompt(&["some_cmd", "an example"], "Password:")];
+        let prompts = vec![prompt(
+            &["some_cmd", "an example"],
+            "Password:",
+            DEFAULT_NAME,
+        )];
         assert_eq!(
-            find_prompt(&toks(&["some_cmd", "an example"]), &prompts),
+            find_prompt(&toks(&["some_cmd", "an example"]), &prompts).map(|p| p.prompt.as_str()),
             Some("Password:")
         );
         assert_eq!(
             find_prompt(&toks(&["some_cmd", "an", "example"]), &prompts),
             None
         );
+    }
+
+    #[test]
+    fn cmd_add_then_load_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompts.yml");
+        cmd_add(
+            &path,
+            &toks(&["ssh", "dev-server"]),
+            "{USER}@dev-server's password:",
+            "work",
+            "alice",
+        )
+        .unwrap();
+
+        let prompts = load(&path, "alice").unwrap();
+        assert_eq!(
+            prompts,
+            vec![prompt(
+                &["ssh", "dev-server"],
+                "alice@dev-server's password:",
+                "work"
+            )]
+        );
+    }
+
+    #[test]
+    fn cmd_add_omits_the_password_key_for_the_default_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompts.yml");
+        cmd_add(&path, &toks(&["sudo"]), "Password:", DEFAULT_NAME, "alice").unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("password"));
+    }
+
+    #[test]
+    fn cmd_add_rejects_a_duplicate_command_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompts.yml");
+        cmd_add(&path, &toks(&["sudo"]), "Password:", DEFAULT_NAME, "alice").unwrap();
+        let err = cmd_add(&path, &toks(&["sudo"]), "Other:", DEFAULT_NAME, "alice").unwrap_err();
+        assert!(matches!(err, AppError::PromptEntryExists { .. }));
+    }
+
+    #[test]
+    fn cmd_add_rejects_an_invalid_regex_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompts.yml");
+        let err = cmd_add(&path, &toks(&["sudo"]), "{HOST}:", DEFAULT_NAME, "alice").unwrap_err();
+        assert!(matches!(err, AppError::InvalidPlaceholder { .. }));
+    }
+
+    #[test]
+    fn cmd_remove_deletes_the_exact_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompts.yml");
+        cmd_add(&path, &toks(&["sudo"]), "Password:", DEFAULT_NAME, "alice").unwrap();
+        cmd_remove(&path, &toks(&["sudo"])).unwrap();
+
+        let prompts = load(&path, "alice").unwrap();
+        assert!(prompts.is_empty());
+    }
+
+    #[test]
+    fn cmd_remove_errors_when_nothing_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompts.yml");
+        let err = cmd_remove(&path, &toks(&["sudo"])).unwrap_err();
+        assert!(matches!(err, AppError::PromptEntryNotFound { .. }));
     }
 }
