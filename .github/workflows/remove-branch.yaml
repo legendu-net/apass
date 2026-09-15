@@ -5,7 +5,5 @@ on:
       timezone: 'America/Los_Angeles'
 jobs:
   remove_branch:
-    uses: legendu-net/.github/.github/workflows/remove_branch.yaml@main
-    with:
-      pattern: '^(?!(main|dev)$)'
+    uses: legendu-net/.github/.github/workflows/remove-branch.yaml@main
     secrets: inherit

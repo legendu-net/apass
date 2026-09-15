@@ -1,4 +1,4 @@
-# apass  |  [@GitHub](https://github.com/legendu-net/apass)
+# apass | [@GitHub](https://github.com/legendu-net/apass)
 
 Run commands without the need to enter your password (repeatedly).
 
