@@ -44,6 +44,14 @@ fn seed_cached_password(config_dir: &Path, name: &str, password: &str) {
     fs::write(config_dir.join("profile.json"), json).unwrap();
 }
 
+fn apass_cmd(home: &Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_apass"));
+    cmd.env("HOME", home);
+    cmd.env("LOGNAME", "testuser");
+    cmd.env("USER", "testuser");
+    cmd
+}
+
 #[test]
 fn fills_in_the_password_and_hands_the_terminal_back() {
     let home = tempfile::tempdir().unwrap();
@@ -51,8 +59,7 @@ fn fills_in_the_password_and_hands_the_terminal_back() {
     write_prompts(&config_dir);
     seed_cached_password(&config_dir, "default", "hunter2");
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_apass"));
-    cmd.env("HOME", home.path());
+    let mut cmd = apass_cmd(home.path());
     // Both the preamble and the prompt text are passed via environment
     // variables rather than embedded literally in the `-c` script, so
     // neither string appears in apass's own "Auto filling password for the
@@ -102,8 +109,7 @@ fn errors_when_no_prompt_matches_the_command() {
     write_prompts(&config_dir);
     seed_cached_password(&config_dir, "default", "hunter2");
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_apass"));
-    cmd.env("HOME", home.path());
+    let mut cmd = apass_cmd(home.path());
     cmd.args(["run", "echo", "hello"]);
 
     let mut session = OsSession::spawn(cmd).unwrap();
@@ -123,8 +129,7 @@ fn succeeds_when_the_command_exits_without_ever_prompting() {
     write_prompts(&config_dir);
     seed_cached_password(&config_dir, "default", "hunter2");
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_apass"));
-    cmd.env("HOME", home.path());
+    let mut cmd = apass_cmd(home.path());
     cmd.args(["run", "sh", "-c", "echo already-unlocked-output"]);
 
     let mut session = OsSession::spawn(cmd).unwrap();
@@ -149,8 +154,7 @@ fn uses_the_password_named_by_the_matching_prompt_entry() {
     write_prompts_with_named_password(&config_dir, "work");
     seed_cached_password(&config_dir, "work", "correct-horse");
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_apass"));
-    cmd.env("HOME", home.path());
+    let mut cmd = apass_cmd(home.path());
     cmd.args([
         "run",
         "sh",
@@ -175,8 +179,7 @@ fn errors_when_the_named_password_is_not_cached() {
     write_prompts_with_named_password(&config_dir, "work");
     // No `profile.json` seeded at all -- "work" has never been cached.
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_apass"));
-    cmd.env("HOME", home.path());
+    let mut cmd = apass_cmd(home.path());
     cmd.args(["run", "sh", "-c", "printf 'PWPROMPT: '"]);
 
     let mut session = OsSession::spawn(cmd).unwrap();
@@ -199,8 +202,7 @@ fn password_list_and_remove_work_through_the_compiled_binary() {
 
     let list = |home: &Path| {
         String::from_utf8(
-            Command::new(env!("CARGO_BIN_EXE_apass"))
-                .env("HOME", home)
+            apass_cmd(home)
                 .args(["passwd", "list"])
                 .output()
                 .unwrap()
@@ -211,8 +213,7 @@ fn password_list_and_remove_work_through_the_compiled_binary() {
 
     assert!(list(home.path()).contains("work"));
 
-    let remove = Command::new(env!("CARGO_BIN_EXE_apass"))
-        .env("HOME", home.path())
+    let remove = apass_cmd(home.path())
         .args(["passwd", "remove", "work"])
         .output()
         .unwrap();
@@ -220,8 +221,7 @@ fn password_list_and_remove_work_through_the_compiled_binary() {
     assert!(!list(home.path()).contains("work"));
 
     // Removing an already-absent name is an error, surfaced on stderr.
-    let remove_again = Command::new(env!("CARGO_BIN_EXE_apass"))
-        .env("HOME", home.path())
+    let remove_again = apass_cmd(home.path())
         .args(["passwd", "remove", "work"])
         .output()
         .unwrap();
@@ -233,8 +233,7 @@ fn password_list_and_remove_work_through_the_compiled_binary() {
 fn prompt_add_list_and_remove_work_through_the_compiled_binary() {
     let home = tempfile::tempdir().unwrap();
 
-    let add = Command::new(env!("CARGO_BIN_EXE_apass"))
-        .env("HOME", home.path())
+    let add = apass_cmd(home.path())
         .args([
             "prompt",
             "add",
@@ -254,8 +253,7 @@ fn prompt_add_list_and_remove_work_through_the_compiled_binary() {
         String::from_utf8_lossy(&add.stderr)
     );
 
-    let list = Command::new(env!("CARGO_BIN_EXE_apass"))
-        .env("HOME", home.path())
+    let list = apass_cmd(home.path())
         .args(["prompt", "list"])
         .output()
         .unwrap();
@@ -263,15 +261,13 @@ fn prompt_add_list_and_remove_work_through_the_compiled_binary() {
     assert!(stdout.contains("ssh dev-server"), "got: {stdout:?}");
     assert!(stdout.contains("work"), "got: {stdout:?}");
 
-    let remove = Command::new(env!("CARGO_BIN_EXE_apass"))
-        .env("HOME", home.path())
+    let remove = apass_cmd(home.path())
         .args(["prompt", "remove", "--", "ssh", "dev-server"])
         .output()
         .unwrap();
     assert!(remove.status.success());
 
-    let list_after = Command::new(env!("CARGO_BIN_EXE_apass"))
-        .env("HOME", home.path())
+    let list_after = apass_cmd(home.path())
         .args(["prompt", "list"])
         .output()
         .unwrap();
@@ -290,16 +286,8 @@ fn h_is_an_alias_for_the_auto_generated_help_subcommand() {
     // and needs to go through the compiled binary.
     let home = tempfile::tempdir().unwrap();
 
-    let via_alias = Command::new(env!("CARGO_BIN_EXE_apass"))
-        .env("HOME", home.path())
-        .arg("h")
-        .output()
-        .unwrap();
-    let via_full_name = Command::new(env!("CARGO_BIN_EXE_apass"))
-        .env("HOME", home.path())
-        .arg("help")
-        .output()
-        .unwrap();
+    let via_alias = apass_cmd(home.path()).arg("h").output().unwrap();
+    let via_full_name = apass_cmd(home.path()).arg("help").output().unwrap();
 
     assert!(via_alias.status.success());
     assert_eq!(via_alias.stdout, via_full_name.stdout);

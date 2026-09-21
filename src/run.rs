@@ -127,7 +127,18 @@ fn interact(mut session: OsSession) -> Result<(), AppError> {
         let _ = session.set_echo(false);
     }
     stdin.close()?;
-    result?;
+    let is_alive = result?;
+    // When the child process exits immediately after emitting its final output,
+    // `interact_polling` detects `!StillAlive` at the start of its loop and
+    // returns early before reading any remaining buffered data from the pty.
+    // Draining up to EOF recovers that trailing output.
+    if !is_alive {
+        session.set_expect_timeout(Some(Duration::from_secs(1)));
+        if let Ok(caps) = session.expect(expectrl::Eof) {
+            io::stdout().write_all(caps.as_bytes())?;
+            io::stdout().flush()?;
+        }
+    }
     Ok(())
 }
 

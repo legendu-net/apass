@@ -34,6 +34,8 @@ fn write_config(home: &std::path::Path) {
 fn spawn_apass_wrapping_a_slow_command(home: &std::path::Path) -> OsSession {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_apass"));
     cmd.env("HOME", home);
+    cmd.env("LOGNAME", "testuser");
+    cmd.env("USER", "testuser");
     cmd.args([
         "run",
         "sh",
